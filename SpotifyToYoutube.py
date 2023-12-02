@@ -14,10 +14,6 @@ import sys
 # Need to later rebuild the authentification to work with JSON files that contain API keys etc.
 # for others to use the script (provide example JSONs in documentation)
 
-"""
-babobusyt@gmail.com
-Heute-Abend-Um-6
-"""
 #%% Spotify related functions  
 def authenticate_spotify():
     """
