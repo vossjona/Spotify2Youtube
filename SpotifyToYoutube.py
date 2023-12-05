@@ -11,8 +11,16 @@ import requests
 import os
 import sys
 
+from tqdm import tqdm
+from time import sleep
+
+
 # Need to later rebuild the authentification to work with JSON files that contain API keys etc.
 # for others to use the script (provide example JSONs in documentation)
+
+# Expected quota: 
+playlist_length = 69
+quota = playlist_length * 100 + 1 + 50 + playlist_length * 50
 
 #%% Spotify related functions  
 def authenticate_spotify():
@@ -83,7 +91,17 @@ def build_youtube_api_client():
     youtube = build("youtube", "v3", credentials=credentials)
     return youtube
 
-def get_youtube_playlists(youtube_api_client):
+def get_playlist_id_if_exists(youtube_api_client, playlist_name):
+    """
+    Checks if a playlist with the given playlist_name already exists in the user's YouTube account.
+
+    Args:
+        youtube_api_client: The YouTube API client object.
+        playlist_name: The Title of the playlist to check.
+
+    Returns:
+        Playlist ID if the playlist already exists, None otherwise.
+    """
     request = youtube_api_client.playlists().list(
         part="snippet",
         maxResults=50,
@@ -91,9 +109,12 @@ def get_youtube_playlists(youtube_api_client):
     )
     response = request.execute()
 
-    playlists = response.get('items', [])
-
-    return playlists
+    existing_playlists = response.get('items', [])
+    for playlist in existing_playlists:
+        if playlist['snippet']['title'] == playlist_name:
+            print(f"This playlist already exists.")
+            return playlist['id']
+    return None
 
 def delete_youtube_playlist(youtube_api_client, playlist_id):
     request = youtube_api_client.playlists().delete(id=playlist_id)
@@ -102,29 +123,28 @@ def delete_youtube_playlist(youtube_api_client, playlist_id):
 def create_youtube_playlist(youtube_api_client, playlist_name):
     """
     Creates a new YouTube playlist with the given name using the YouTube API client.
+    If a playlist with the same name already exists, it returns the existing playlist ID.
 
     Args:
         playlist_name (str): The name of the playlist to be created.
         youtube_api_client: The YouTube API client object.
 
-
     Returns:
-        str: The ID of the created playlist.
-        str: The URL to the created playlist.
-
-    Raises:
-        HttpError: If an HTTP error occurs during the playlist creation.
+        str: The ID of the created playlist or the existing playlist.
     """
-    existing_playlists = get_youtube_playlists(youtube_api_client)
-    # Check if a playlist with the same name already exists
-    # Delete it if thats the case
-    if existing_playlists:
-        for playlist in existing_playlists:
-            if playlist['snippet']['title'] == playlist_name:
-                print(f"A playlist with the name '{playlist_name}' already exists. Deleting it...")
-                delete_youtube_playlist(youtube_api_client, playlist['id'])
-                break
-        
+    request = youtube_api_client.playlists().list(
+        part="snippet",
+        maxResults=50,
+        mine=True
+    )
+    response = request.execute()
+
+    existing_playlists = response.get('items', []) # check if Playlist exists already
+    for playlist in existing_playlists:
+        if playlist['snippet']['title'] == playlist_name:
+            print(f"This playlist already exists.")
+            return playlist['id']
+
     new_playlist = {
         "snippet": {
             "title": playlist_name
@@ -134,17 +154,41 @@ def create_youtube_playlist(youtube_api_client, playlist_name):
         }
     }
     # Insert the playlist
-    try:
-        response = youtube_api_client.playlists().insert(
-            part="snippet,status",
-            body=new_playlist
-        ).execute()
-    except HttpError as e:
-        print(f"An HTTP error {e.resp.status} occurred:\n{e.content}")
-        return None
+    response = youtube_api_client.playlists().insert(
+        part="snippet,status",
+        body=new_playlist
+    ).execute()
+    print('New Playlist created')
     # Return the ID of the created playlist
-    return response["id"]
+    playlist_id = response["id"]
+    return playlist_id
 
+def get_video_info_in_playlist(youtube_api_client, playlist_id):
+    """
+    Retrieves the video IDs and names of all videos in a given playlist.
+
+    Args:
+        youtube_api_client: The YouTube API client object.
+        playlist_id: The ID of the playlist.
+
+    Returns:
+        List: Video IDs and names in the playlist.
+    """
+    request = youtube_api_client.playlistItems().list(
+        part="contentDetails,snippet",
+        maxResults=50,
+        playlistId=playlist_id
+    )
+    response = request.execute()
+
+    video_info = []
+    playlist_items = response.get('items', [])
+    for item in playlist_items:
+        video_id = item['contentDetails']['videoId']
+        video_name = item['snippet']['title']
+        video_info.append({'id': video_id, 'name': video_name})
+    return video_info
+    
 def create_youtube_query(track, tracklist):
     artist_string = ' '.join(tracklist[track])
     youtube_query = track + ' ' + artist_string # + ' lyrics'
@@ -174,7 +218,7 @@ def search_youtube_video(query):
     if response.status_code == 200:
         video_id = response.json()["items"][0]["id"]["videoId"]
         video_url = f"https://www.youtube.com/watch?v={video_id}"
-        return video_url
+        return video_id
     else:
         print(f"Search request failed with status code {response.status_code}")
         return None
@@ -195,53 +239,64 @@ def add_video_to_playlist(youtube_api_client, playlist_id, video_id):
     response = request.execute()
     return response
 
+def fill_youtube_playlist(youtube_api_client, playlist_name, tracklist):
+    """
+    Fills a YouTube playlist with videos based on a tracklist.
+
+    Args:
+        youtube_api_client (object): The YouTube API client object.
+        playlist_name (str): The name of the playlist to fill.
+        tracklist (list): The list of tracks to search for and add to the playlist.
+
+    Returns:
+        None
+    """
+    playlist_id = create_youtube_playlist(youtube_api_client, playlist_name)
+    videos_in_playlist = get_video_info_in_playlist(youtube_api_client, playlist_id)
+    new_tracklist = {}
+    for track, value in tracklist.items():
+        for video in videos_in_playlist:
+            if track in video['name']: #and value[0] in video['name']
+                break  # Skip to the next track if this one is already in the playlist
+        else:  # This else clause corresponds to the for loop, not the if statement
+            new_tracklist[track] = value  # Add the track to new_tracklist if it's not in the playlist
+            
+            
+    for track in tqdm(new_tracklist):
+        sleep(0.1)
+        try:
+            query = create_youtube_query(track, new_tracklist)
+            print('\n' + query)
+            video_id = search_youtube_video(query)
+            add_video_to_playlist(youtube_api_client, playlist_id, video_id)
+        except AttributeError:
+            print(query + 'could not be found! Skipping...')
+            continue
+        except HttpError as e:
+            if e.resp.status == 403:
+                print("Daily quota exceeded. Operation aborted.")
+                sys.exit(1)
+            else:
+                print(f"HttpError occurred: {e}")
+                print('Continuing...')
+                continue
+    return playlist_id
+    
 
 #%% Main   
 def main():
-    playlist_link = 'https://open.spotify.com/playlist/0G2Fto1sUommXvdFADH2yl?si=5399d29fc49747a0'
+    playlist_link = 'https://open.spotify.com/playlist/3V0bRnPh6TLOGzO7RyqgG8?si=6cb4d7f5b85248b8'
     #Authentifications
     spotify = authenticate_spotify()
     youtube_api_client = build_youtube_api_client()
     
     playlist_name, tracklist = get_spotify_playlist_info(spotify, playlist_link)
     # print(f'Playlist: {playlist_name}, Tracks: {tracklist}')
-    # print(f'Playlist: {playlist_name}, Tracks: {tracklist}')
     
-    try:
-        playlist_id = create_youtube_playlist(youtube_api_client, playlist_name)
-    except HttpError as e:
-            if e.resp.status == 403:
-                print("Quota exceeded. Operation aborted.")
-                sys.exit(1)
-            else:
-                print(f"HttpError occurred: {e}")
-                sys.exit(1)
-        
-    for track in tracklist:
-        try:
-            query = create_youtube_query(track, tracklist)
-            # print(query)
-            url = search_youtube_video(query)
-            # print(url)
-            
-            video_id = url.split("v=")[1]
-            add_video_to_playlist(youtube_api_client, playlist_id, video_id)
-        except AttributeError:
-            print(query)
-            continue
-        except HttpError as e:
-            if e.resp.status == 403:
-                print("Quota exceeded. Operation aborted.")
-                sys.exit(1)
-            else:
-                print(f"HttpError occurred: {e}")
-                continue
-        
-
+    playlist_id = fill_youtube_playlist(youtube_api_client, playlist_name, tracklist)
     print('All done!')
     youtube_playlist_link = f"https://www.youtube.com/playlist?list={playlist_id}"
     print(f'Here is the link to your playlist:\n{youtube_playlist_link}')
-
     
 
 if __name__ == "__main__":
